@@ -17,55 +17,108 @@
 
 set -e
 
-JUJU_ENV=$1
-JUJU_HOME=${JUJU_HOME:-~/.juju}
+function clean_juju_1() {
+  # Clean up Juju using version 1.x conventions.
+  JUJU_ENV=$1
+  JUJU_HOME=${JUJU_HOME:-~/.juju}
 
-if [ ! "$JUJU_ENV" ]; then
-  echo "Please run juju clean <environment>"
-  exit 1
+  if [ ! "$JUJU_ENV" ]; then
+    echo "Please run juju clean <environment>"
+    exit 1
+  fi
+
+  if [ "$JUJU_ENV" == "--description" ]; then
+    echo "Destroy environment and clean any remaining files"
+    exit 0
+  fi
+
+  if [ "$JUJU_ENV" == "--help" ]; then
+    echo "juju clean [JUJU_ENV]"
+    echo ""
+    echo "Destroy the [JUJU_ENV] and remove any .jenv or local directories associated with the environment"
+    exit 0
+  fi
+
+  echo "Destroying '$JUJU_ENV' environment" >&2
+  juju destroy-environment -y $JUJU_ENV >/dev/null 2>&1 || true
+  juju destroy-environment --force -y $JUJU_ENV >/dev/null 2>&1 || true
+
+  echo "Removing any extra environment files in '${JUJU_HOME}'" >&2
+  rm -f ~/${JUJU_HOME}/environments/$JUJU_ENV.jenv
+  rm -rf ~/${JUJU_HOME}/$JUJU_ENV || true
+
+  echo "Checking for errors with local provider" >&2
+
+  echo "Stopping juju daemons" >&2
+  for jujudaemon in $(sudo initctl list | grep juju | cut -d ' ' -f 1)
+  do
+      sudo stop ${jujudaemon} || true
+  done
+  echo "Destroying juju template containers" >&2
+  for container in $(sudo lxc-ls | grep -e "^juju.*template$" )
+  do
+    sudo lxc-stop --name ${container} && sudo lxc-destroy --name ${container} || true
+  done
+
+  echo "Cleaning local providor files" >&2
+  sudo rm /etc/init/juju-* || true
+  sudo rm /etc/rsyslog.d/25-juju* || true
+  sudo rm -rf /var/lib/juju/containers/${USER}-* || true
+  sudo rm -rf /var/lib/juju/locks/* || true
+  echo "Cleaning lxc files" >&2
+  sudo rm -rf /var/cache/lxc/cloud-* || true
+  sudo rm /var/lib/lxc/juju-* || true
+  sudo rm /etc/lxc/auto/${USER}-* || true
+}
+
+function clean_juju_2() {
+  local juju_controller=$1
+  # The juju 2.x configuration directory.
+  local juju_home=${JUJU_HOME:-~/.local/share/juju}
+  local description="Destroy and completely clean a juju 2.x controller."
+  local warning="This is an extremely destructive operation, born from the
+  frustrating situation where all other juju commands fail.\n
+  Try 'juju destroy-controller controller' first.\n
+  Then 'juju kill-controller controller' second.\n
+  If all else fails use clean, and may god have mercy on the controller because
+  this script will not."
+
+  if [ -z "${juju_controller}"]; then
+    echo $description
+    echo -e $warning
+    exit 1
+  fi
+
+  # Only kill lxd containers if you are trying to clean a lxd controller.
+  if [[ ${juju_controller} == *lxd* ]]; then
+    echo "Stopping and deleting the Juju LXD containers."
+    local containers=$(lxc list | grep juju | cut -d '|' -f 2)
+    for container in $containers ; do
+      lxc stop ${container}
+      lxc delete ${container}
+    done
+  else
+    echo "No local containers to clean for ${juju_controller}"
+  fi
+
+  echo "Cleaning local Juju 2.x configuration files."
+  rm -v ${juju_home}/bootstrap-config.yaml || true
+  rm -v ${juju_home}/controllers.yaml || true
+  rm -v ${juju_home}/current-controller || true
+  rm -v ${juju_home}/models.yaml || true
+
+  echo "Deleting the deployer store cache."
+  rm -rf ${juju_home}/.deployer-store-cache
+
+  echo "The Juju controller ${juju_controller} cleaned."
+}
+
+JUJU_VERSION=`juju version`
+
+if [[ $JUJU_VERSION == 1.* ]]; then
+  clean_juju_1
+elif [[ $JUJU_VERSION == 2.* ]]; then
+  clean_juju_2
+else
+  echo "Unknown Juju version, clean aborted!"
 fi
-
-if [ "$JUJU_ENV" == "--description" ]; then
-  echo "Destroy environment and clean any remaining files"
-  exit 0
-fi
-
-if [ "$JUJU_ENV" == "--help" ]; then
-  echo "juju clean [JUJU_ENV]"
-  echo ""
-  echo "Destroy the [JUJU_ENV] and remove any .jenv or local directories associated with the environment"
-  exit 0
-fi
-
-echo "Destroying '$JUJU_ENV' environment" >&2
-juju destroy-environment -y $JUJU_ENV >/dev/null 2>&1 || true
-juju destroy-environment --force -y $JUJU_ENV >/dev/null 2>&1 || true
-
-echo "Removing any extra environment files in '${JUJU_HOME}'" >&2
-rm -f ~/${JUJU_HOME}/environments/$JUJU_ENV.jenv
-rm -rf ~/${JUJU_HOME}/$JUJU_ENV || true
-
-echo "Checking for errors with local provider" >&2
-
-echo "Stopping juju daemons" >&2
-for jujudaemon in $(sudo initctl list | grep juju | cut -d ' ' -f 1)
-do
-    sudo stop ${jujudaemon} || true
-done
-echo "Destroying juju template containers" >&2
-for container in $(sudo lxc-ls | grep -e "^juju.*template$" )
-do
-  sudo lxc-stop --name ${container} && sudo lxc-destroy --name ${container} || true
-done
-
-echo "Cleaning local providor files" >&2
-sudo rm /etc/init/juju-* || true
-sudo rm /etc/rsyslog.d/25-juju* || true
-sudo rm -rf /var/lib/juju/containers/${USER}-* || true
-sudo rm -rf /var/lib/juju/locks/* || true
-echo "Cleaning lxc files" >&2
-sudo rm -rf /var/cache/lxc/cloud-* || true
-sudo rm /var/lib/lxc/juju-* || true
-sudo rm /etc/lxc/auto/${USER}-* || true
-
-echo "Clean and ready for bootstrap"
